@@ -1,5 +1,8 @@
 from elasticsearch import Elasticsearch
+import elasticsearch
 from elasticsearch.helpers import bulk
+import time
+import hashlib
 
 
 class ESClient(object):
@@ -12,23 +15,50 @@ class ESClient(object):
         self.es = Elasticsearch(hosts=self.hosts, http_auth=(self.user, self.password), port=9200, timeout=10000)
 
     def delete_index(self):
+        """delete index"""
         return self.es.indices.delete(index=self.index)
 
     def build_index(self, overwrite=False):
+        """build a new index"""
         if self.es.indices.exists(self.index):
             if not overwrite:
                 print("The index \"%s\" already exists, are you sure to delete it? Set overwrite to true" % self.index)
                 return None
             else:
                 self.delete_index()
-        # build a new index
         self.es.indices.create(index=self.index, body=self.mappings)
 
     def get_mappings(self):
+        """get the mappings"""
         raise NotImplemented
 
     def get_index(self):
+        """get index name"""
         raise NotImplemented
+
+    def search(self, query):
+        """search"""
+        raise NotImplemented
+
+    def bulk_docs(self, actions, chunk_size=1000):
+        """批处理插入文档，actions中指定 _op_type 为 create 当_id存在时不插入"""
+        success, _ = bulk(self.es,
+                          actions=actions,
+                          stats_only=True,
+                          index=self.index,
+                          chunk_size=chunk_size,
+                          raise_on_exception=False,  # 插入数据失败时，不需要抛出异常
+                          raise_on_error=False  # 不抛出BulkIndexError
+                          )
+        return success
+
+    def index_doc(self, action, id=None):
+        try:
+            self.es.index(index=self.index, doc_type="_doc", id=id, body=action, op_type='create')
+            return 1
+        except Exception as e:
+            print(str(e))
+            return 0
 
 
 class PaperClient(ESClient):
@@ -42,13 +72,9 @@ class PaperClient(ESClient):
         mappings = {
             "mappings": {
                 "properties": {
-                    "paperId": {
-                        "type": "long",
-                        "index": "false"
-                    },
-                    "uniqueId": {
+                    "id": {
                         "type": "keyword",  # hash code
-                        "index": "false"
+                        "index": "true"
                     },
                     "title": {
                         "type": "text",
@@ -95,10 +121,19 @@ class PaperClient(ESClient):
         }
         return mappings
 
-    def search(self):
-        pass
+    @staticmethod
+    def update_action(source, is_bulk=False):
+        "source dict()"
+        md5 = hashlib.md5()
+        text = '-'.join([source['title']] + source['authors'])
+        md5.update(text.encode('utf-8'))
+        hashcode = md5.hexdigest()
+        source = dict({"id": hashcode}, **source)
+        if is_bulk:
+            source = {"_id": hashcode, "_source": source}
+        return source, hashcode
 
-    def bulk_write(self):
+    def search(self, query):
         pass
 
 
@@ -114,13 +149,9 @@ class TripletClient(ESClient):
         mappings = {
             "mappings": {
                 "properties": {
-                    "tripletId": {
-                        "type": "long",
-                        "index": "false"
-                    },
-                    "uniqueId": {
+                    "id": {
                         "type": "keyword",  # hash code
-                        "index": "false"
+                        "index": "true"
                     },
                     "headEntity": {
                         "type": "text",
@@ -147,16 +178,37 @@ class TripletClient(ESClient):
         }
         return mappings
 
-    def search(self):
+    @staticmethod
+    def update_action(source, is_bulk=False):
+        "source dict()"
+        md5 = hashlib.md5()
+        text = '-'.join([v for _, v in source.items()])
+        md5.update(text.encode('utf-8'))
+        hashcode = md5.hexdigest()
+        source = dict({"id": hashcode}, **source)
+        if is_bulk:
+            source = {"_id": hashcode, "_source": source}
+        return source, hashcode
+
+    def search(self, query):
         pass
 
-    def bulk_write(self):
-        pass
+
 
 
 if __name__ == "__main__":
-    PC = PaperClient()
-    PC.build_index()
-    # if PC.es.indices.exists("hello"):
-    #     b=PC.es.indices.delete(index='hello')
-    #     print(b)
+    # PC = PaperClient()
+    # PC.build_index()
+    TC = TripletClient()
+    TC.build_index(overwrite=True)
+    IS_BULK = True
+    triplet1_action = {"headEntity": "CNN", "headEntityType": "METHOD", "tailEntity": "classification",
+                       "tailEntityType": "TASK", "relationType": "USED-FOR"}
+    triplet1_action, id1 = TC.update_action(triplet1_action, is_bulk=IS_BULK)
+    triplet2_action = {"headEntity": "RNN", "headEntityType": "METHOD", "tailEntity": "classification",
+                       "tailEntityType": "TASK", "relationType": "USED-FOR"}
+    triplet2_action, id2 = TC.update_action(triplet2_action, is_bulk=IS_BULK)
+
+    actions = [triplet1_action, triplet2_action, triplet2_action]
+    print(TC.bulk_docs(actions=actions))
+    # print(TC.index_doc(action=triplet2_source, id=id2))
